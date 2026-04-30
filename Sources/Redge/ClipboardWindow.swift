@@ -207,12 +207,13 @@ struct PanelView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .controlSize(.small)
             .frame(maxWidth: .infinity)
             Button(action: { clipboardManager.isFrozen.toggle() }) {
                 Image(systemName: clipboardManager.isFrozen ? "pin.fill" : "pin")
-                    .font(.system(size: 12))
+                    .font(.system(size: 11))
                     .rotationEffect(.degrees(clipboardManager.isFrozen ? 0 : 45))
-                    .frame(width: 22, height: 22)
+                    .frame(width: 20, height: 20)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -220,7 +221,8 @@ struct PanelView: View {
             .help(clipboardManager.isFrozen ? "Unpin (auto-hide on)" : "Pin panel open")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.top, 7)
+        .padding(.bottom, 4)
     }
 
     private var strokeColor: Color {
@@ -279,16 +281,72 @@ struct ClipboardContentView: View {
     let onClear: () -> Void
     let onTogglePin: (ClipboardItem) -> Void
     @FocusState private var isSearchFocused: Bool
+    @State private var subTab: SubTab = .temp
+    @State private var isAddingNote = false
+    @State private var newNoteText = ""
+
+    enum SubTab: String, CaseIterable, Hashable {
+        case temp = "Temp"
+        case notes = "Notes"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            subTabBar
             searchBar
             Divider()
-            contentArea
+            Group {
+                if subTab == .temp {
+                    tempContentArea
+                } else {
+                    notesContentArea
+                }
+            }
         }
         .onChange(of: clipboardManager.searchFocusRequest) { _ in
             isSearchFocused = true
         }
+    }
+
+    private var subTabBar: some View {
+        HStack(spacing: 0) {
+            ForEach(SubTab.allCases, id: \.self) { tab in
+                subTabButton(tab)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
+        .padding(.bottom, 2)
+    }
+
+    private func subTabButton(_ tab: SubTab) -> some View {
+        let active = subTab == tab
+        let count = tab == .temp ? clipboardManager.history.count : clipboardManager.notes.count
+        return Button(action: { subTab = tab }) {
+            VStack(spacing: 3) {
+                HStack(spacing: 4) {
+                    Text(tab.rawValue)
+                        .font(.system(size: 11, weight: active ? .semibold : .regular))
+                        .foregroundColor(active ? .primary : .secondary)
+                    if count > 0 {
+                        Text("\(count)")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(.secondary.opacity(0.75))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.white.opacity(active ? 0.10 : 0.05))
+                            .clipShape(Capsule())
+                    }
+                }
+                Rectangle()
+                    .fill(active ? Color.accentColor : Color.clear)
+                    .frame(height: 1.5)
+            }
+            .padding(.horizontal, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var searchBar: some View {
@@ -296,7 +354,8 @@ struct ClipboardContentView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
-            TextField("Search text and image content…", text: $clipboardManager.searchQuery)
+            TextField(subTab == .temp ? "Search text and image content…" : "Search notes…",
+                      text: $clipboardManager.searchQuery)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
                 .focused($isSearchFocused)
@@ -308,26 +367,54 @@ struct ClipboardContentView: View {
                 }
                 .buttonStyle(.plain)
             }
-            if !clipboardManager.history.isEmpty {
+            if subTab == .notes {
+                Button(action: {
+                    newNoteText = ""
+                    isAddingNote = true
+                }) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundColor(.accentColor)
+                }
+                .buttonStyle(.plain)
+                .help("Add note")
+                .popover(isPresented: $isAddingNote, arrowEdge: .bottom) {
+                    NoteEditor(
+                        title: "New Note",
+                        text: $newNoteText,
+                        onSave: {
+                            clipboardManager.addNote(text: newNoteText)
+                            newNoteText = ""
+                            isAddingNote = false
+                        },
+                        onCancel: {
+                            newNoteText = ""
+                            isAddingNote = false
+                        }
+                    )
+                }
+            }
+            if subTab == .temp && !clipboardManager.history.isEmpty {
                 Button(action: onClear) {
                     Image(systemName: "trash")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Clear history (keeps pinned)")
+                .help("Clear Temp (keeps pinned + Notes)")
             }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.vertical, 4)
         .background(Color.white.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.top, 4)
+        .padding(.bottom, 6)
     }
 
     @ViewBuilder
-    private var contentArea: some View {
+    private var tempContentArea: some View {
         if clipboardManager.history.isEmpty {
             emptyView(
                 icon: "doc.on.clipboard",
@@ -349,7 +436,47 @@ struct ClipboardContentView: View {
                             searchQuery: clipboardManager.searchQuery,
                             onTap: { onCopy(item.content) },
                             onDelete: { onDelete(item) },
-                            onTogglePin: { onTogglePin(item) }
+                            onTogglePin: { onTogglePin(item) },
+                            onSaveToNotes: {
+                                clipboardManager.saveItemToNotes(item)
+                            }
+                        )
+                    }
+                }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 6)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var notesContentArea: some View {
+        if clipboardManager.notes.isEmpty {
+            emptyView(
+                icon: "note.text",
+                title: "No notes yet",
+                subtitle: "Tap + to add — or click the bookmark on any Temp row to save it here. Notes persist forever, never cleared by Clear Temp."
+            )
+        } else if clipboardManager.filteredNotes.isEmpty {
+            emptyView(
+                icon: "magnifyingglass",
+                title: "No matches",
+                subtitle: "Try a different search"
+            )
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(clipboardManager.filteredNotes) { note in
+                        NoteRow(
+                            note: note,
+                            searchQuery: clipboardManager.searchQuery,
+                            onTap: { onCopy(.text(note.text)) },
+                            onSave: { newText in
+                                clipboardManager.updateNote(id: note.id, text: newText)
+                            },
+                            onDelete: {
+                                clipboardManager.deleteNote(id: note.id)
+                            }
                         )
                     }
                 }
@@ -385,8 +512,10 @@ struct ClipboardRow: View {
     let onTap: () -> Void
     let onDelete: () -> Void
     let onTogglePin: () -> Void
+    let onSaveToNotes: () -> Void
     @State private var isHovered = false
     @State private var didCopy = false
+    @State private var didBookmark = false
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -425,6 +554,19 @@ struct ClipboardRow: View {
                             NSWorkspace.shared.open(url)
                         }
                     }
+                    if case .text = item.content {
+                        HoverIconButton(
+                            systemName: didBookmark ? "bookmark.fill" : "bookmark",
+                            help: "Save to Notes",
+                            color: didBookmark ? .accentColor : .secondary
+                        ) {
+                            onSaveToNotes()
+                            didBookmark = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                                didBookmark = false
+                            }
+                        }
+                    }
                     HoverIconButton(
                         systemName: item.isPinned ? "pin.slash.fill" : "pin.fill",
                         help: item.isPinned ? "Unpin" : "Pin",
@@ -443,7 +585,10 @@ struct ClipboardRow: View {
     }
 
     private var hoverButtonsWidth: CGFloat {
-        urlIfPresent != nil ? 64 : 44
+        var w: CGFloat = 44  // pin + delete
+        if case .text = item.content { w += 22 }  // bookmark
+        if urlIfPresent != nil { w += 22 }  // open URL
+        return w
     }
 
     private var urlIfPresent: URL? {
@@ -571,6 +716,128 @@ struct HoverIconButton: View {
     }
 }
 
+struct NoteRow: View {
+    let note: Note
+    let searchQuery: String
+    let onTap: () -> Void
+    let onSave: (String) -> Void
+    let onDelete: () -> Void
+    @State private var isHovered = false
+    @State private var didCopy = false
+    @State private var isEditing = false
+    @State private var editText = ""
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "note.text")
+                    .font(.system(size: 11))
+                    .foregroundColor(.accentColor.opacity(0.85))
+                    .padding(.top, 2)
+                Text(displayedText)
+                    .font(.system(size: 12))
+                    .foregroundColor(.primary)
+                    .lineLimit(4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if didCopy {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.green)
+                        .padding(.top, 2)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .padding(.trailing, isHovered && !didCopy ? 44 : 0)
+            .background(isHovered ? Color.white.opacity(0.12) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onTap()
+                didCopy = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { didCopy = false }
+            }
+            .help(note.text)
+
+            if isHovered && !didCopy {
+                HStack(spacing: 2) {
+                    HoverIconButton(systemName: "pencil", help: "Edit") {
+                        editText = note.text
+                        isEditing = true
+                    }
+                    .popover(isPresented: $isEditing, arrowEdge: .bottom) {
+                        NoteEditor(
+                            title: "Edit Note",
+                            text: $editText,
+                            onSave: {
+                                onSave(editText)
+                                isEditing = false
+                            },
+                            onCancel: { isEditing = false }
+                        )
+                    }
+                    HoverIconButton(systemName: "xmark.circle.fill", help: "Delete") {
+                        onDelete()
+                    }
+                }
+                .padding(.top, 4)
+                .padding(.trailing, 4)
+            }
+        }
+        .onHover { hovering in isHovered = hovering }
+    }
+
+    private var displayedText: String {
+        let trimmed = note.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? note.text : trimmed
+    }
+}
+
+struct NoteEditor: View {
+    let title: String
+    @Binding var text: String
+    let onSave: () -> Void
+    let onCancel: () -> Void
+    @FocusState private var editorFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button(action: onCancel) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+                .help("Cancel")
+            }
+            TextEditor(text: $text)
+                .font(.system(size: 12))
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .background(Color.white.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .frame(width: 280, height: 160)
+                .focused($editorFocused)
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.escape, modifiers: [])
+                Button("Save", action: onSave)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(12)
+        .frame(width: 304)
+        .onAppear { editorFocused = true }
+    }
+}
+
 struct InfoBarView: View {
     @State private var showInfo = false
     @AppStorage("autoPasteEnabled") private var autoPasteEnabled: Bool = false
@@ -616,6 +883,8 @@ struct InfoView: View {
             featureRow("rectangle.righthalf.filled", "Slam cursor into the right edge (vertical center) to open")
             featureRow("keyboard", "⌃⌘V toggles the panel from anywhere")
             featureRow("magnifyingglass", "Search across text and image OCR (auto-focused on hotkey)")
+            featureRow("note.text", "Notes sub-tab: persistent text snippets, never wiped by Clear Temp")
+            featureRow("bookmark", "Bookmark icon on a Temp row promotes it to Notes")
             featureRow("pin.fill", "Pin items so they survive Clear and never expire")
             featureRow("text.viewfinder", "Images get OCR'd in the background — search inside screenshots")
             featureRow("hand.draw", "Drag images and text in/out of the panel")

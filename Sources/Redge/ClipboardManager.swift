@@ -24,8 +24,25 @@ struct ClipboardItem: Identifiable, Equatable {
     }
 }
 
+/// A persistent text note. Lives in the Notes sub-tab. Not affected by
+/// Clear-history on the Temp tab. Manually managed by the user.
+struct Note: Identifiable, Equatable, Codable {
+    let id: UUID
+    var text: String
+    let createdAt: Date
+    var updatedAt: Date
+
+    init(id: UUID = UUID(), text: String, createdAt: Date = Date(), updatedAt: Date? = nil) {
+        self.id = id
+        self.text = text
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt ?? createdAt
+    }
+}
+
 final class ClipboardManager: ObservableObject {
     @Published private(set) var history: [ClipboardItem] = []
+    @Published private(set) var notes: [Note] = []
     @Published var isFrozen: Bool = false
     @Published var searchQuery: String = ""
     @Published var searchFocusRequest: Int = 0
@@ -47,12 +64,21 @@ final class ClipboardManager: ObservableObject {
     init() {
         lastChangeCount = NSPasteboard.general.changeCount
         history = store.load()
+        notes = store.loadNotes()
 
         $history
             .dropFirst()
             .debounce(for: .seconds(1.0), scheduler: DispatchQueue.main)
             .sink { [weak self] items in
                 self?.store.save(items)
+            }
+            .store(in: &cancellables)
+
+        $notes
+            .dropFirst()
+            .debounce(for: .seconds(0.6), scheduler: DispatchQueue.main)
+            .sink { [weak self] n in
+                self?.store.saveNotes(n)
             }
             .store(in: &cancellables)
     }
@@ -70,6 +96,38 @@ final class ClipboardManager: ObservableObject {
 
     func flushSave() {
         store.save(history)
+        store.saveNotes(notes)
+    }
+
+    // MARK: - Notes
+
+    var filteredNotes: [Note] {
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if q.isEmpty { return notes }
+        return notes.filter { $0.text.lowercased().contains(q) }
+    }
+
+    func addNote(text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        notes.insert(Note(text: trimmed), at: 0)
+    }
+
+    func updateNote(id: UUID, text: String) {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[idx].text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        notes[idx].updatedAt = Date()
+    }
+
+    func deleteNote(id: UUID) {
+        notes.removeAll { $0.id == id }
+    }
+
+    /// Promote a Temp text item to a permanent Note.
+    func saveItemToNotes(_ item: ClipboardItem) {
+        if case .text(let text) = item.content {
+            addNote(text: text)
+        }
     }
 
     func requestSearchFocus() {

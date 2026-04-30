@@ -14,6 +14,7 @@ struct PersistedItem: Codable {
 final class PersistenceStore {
     private let dirURL: URL
     private let jsonURL: URL
+    private let notesURL: URL
     private let imagesURL: URL
 
     init() {
@@ -23,7 +24,26 @@ final class PersistenceStore {
         dirURL = appSupport.appendingPathComponent("Redge", isDirectory: true)
         imagesURL = dirURL.appendingPathComponent("images", isDirectory: true)
         jsonURL = dirURL.appendingPathComponent("history.json")
+        notesURL = dirURL.appendingPathComponent("notes.json")
         try? FileManager.default.createDirectory(at: imagesURL, withIntermediateDirectories: true)
+    }
+
+    func saveNotes(_ notes: [Note]) {
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(notes)
+            try data.write(to: notesURL)
+        } catch {
+            print("Redge notes save failed: \(error)")
+        }
+    }
+
+    func loadNotes() -> [Note] {
+        guard let data = try? Data(contentsOf: notesURL) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode([Note].self, from: data)) ?? []
     }
 
     func save(_ items: [ClipboardItem]) {
