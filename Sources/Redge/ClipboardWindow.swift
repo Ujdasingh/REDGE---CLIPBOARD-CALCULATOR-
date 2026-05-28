@@ -284,6 +284,9 @@ struct ClipboardContentView: View {
     @State private var subTab: SubTab = .temp
     @State private var isAddingNote = false
     @State private var newNoteText = ""
+    @State private var departingItemId: UUID?
+    @State private var highlightNoteId: UUID?
+    @State private var notesTabPulse = false
 
     enum SubTab: String, CaseIterable, Hashable {
         case temp = "Temp"
@@ -323,9 +326,16 @@ struct ClipboardContentView: View {
     private func subTabButton(_ tab: SubTab) -> some View {
         let active = subTab == tab
         let count = tab == .temp ? clipboardManager.history.count : clipboardManager.notes.count
+        let pulsing = tab == .notes && notesTabPulse
         return Button(action: { subTab = tab }) {
             VStack(spacing: 3) {
                 HStack(spacing: 4) {
+                    if pulsing {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundColor(.accentColor)
+                            .transition(.scale.combined(with: .opacity))
+                    }
                     Text(tab.rawValue)
                         .font(.system(size: 11, weight: active ? .semibold : .regular))
                         .foregroundColor(active ? .primary : .secondary)
@@ -345,8 +355,35 @@ struct ClipboardContentView: View {
             }
             .padding(.horizontal, 6)
             .contentShape(Rectangle())
+            .scaleEffect(pulsing ? 1.06 : 1)
         }
         .buttonStyle(.plain)
+        .animation(.spring(response: 0.32, dampingFraction: 0.72), value: pulsing)
+    }
+
+    private func moveItemToNotes(_ item: ClipboardItem) {
+        guard departingItemId == nil else { return }
+        withAnimation(.easeInOut(duration: 0.42)) {
+            departingItemId = item.id
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                guard let note = clipboardManager.moveItemToNotes(item) else {
+                    departingItemId = nil
+                    return
+                }
+                departingItemId = nil
+                highlightNoteId = note.id
+                subTab = .notes
+                notesTabPulse = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                withAnimation(.easeOut(duration: 0.25)) { notesTabPulse = false }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                withAnimation(.easeOut(duration: 0.4)) { highlightNoteId = nil }
+            }
+        }
     }
 
     private var searchBar: some View {
@@ -420,17 +457,21 @@ struct ClipboardContentView: View {
                         ClipboardRow(
                             item: item,
                             searchQuery: clipboardManager.searchQuery,
+                            isDeparting: departingItemId == item.id,
                             onTap: { onCopy(item.content) },
                             onDelete: { onDelete(item) },
                             onTogglePin: { onTogglePin(item) },
-                            onSaveToNotes: {
-                                clipboardManager.saveItemToNotes(item)
-                            }
+                            onSaveToNotes: { moveItemToNotes(item) }
                         )
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .move(edge: .top)),
+                            removal: .opacity.combined(with: .move(edge: .trailing))
+                        ))
                     }
                 }
                 .padding(.vertical, 6)
                 .padding(.horizontal, 6)
+                .animation(.easeInOut(duration: 0.35), value: clipboardManager.filteredHistory.map(\.id))
             }
         }
     }
@@ -458,7 +499,7 @@ struct ClipboardContentView: View {
                     emptyView(
                         icon: "note.text",
                         title: "No notes yet",
-                        subtitle: "Tap + to add — or click the bookmark on any Temp row to save it here. Notes persist forever, never cleared by Clear Temp."
+                        subtitle: "Tap + to add — or click the bookmark on any Temp row to move it here. Notes persist forever, never cleared by Clear Temp."
                     )
                     .frame(minHeight: 320)
                 } else if !clipboardManager.notes.isEmpty && clipboardManager.filteredNotes.isEmpty && !isAddingNote {
@@ -473,6 +514,7 @@ struct ClipboardContentView: View {
                         NoteRow(
                             note: note,
                             searchQuery: clipboardManager.searchQuery,
+                            isHighlighted: highlightNoteId == note.id,
                             onTap: { onCopy(.text(note.text)) },
                             onSave: { newText in
                                 clipboardManager.updateNote(id: note.id, text: newText)
@@ -481,11 +523,13 @@ struct ClipboardContentView: View {
                                 clipboardManager.deleteNote(id: note.id)
                             }
                         )
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
             }
             .padding(.vertical, 6)
             .padding(.horizontal, 6)
+            .animation(.easeInOut(duration: 0.35), value: clipboardManager.filteredNotes.map(\.id))
         }
     }
 
@@ -540,89 +584,131 @@ private enum CopyTimeFormat {
 struct ClipboardRow: View {
     let item: ClipboardItem
     let searchQuery: String
+    let isDeparting: Bool
     let onTap: () -> Void
     let onDelete: () -> Void
     let onTogglePin: () -> Void
     let onSaveToNotes: () -> Void
     @State private var isHovered = false
     @State private var didCopy = false
-    @State private var didBookmark = false
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            HStack(alignment: .top, spacing: 8) {
-                contentView
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                VStack(alignment: .trailing, spacing: 4) {
-                    if !isHovered && !didCopy && item.isPinned {
-                        Image(systemName: "pin.fill")
-                            .font(.system(size: 9))
-                            .rotationEffect(.degrees(-25))
-                            .foregroundColor(.accentColor)
-                    }
-                    if didCopy {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(.green)
-                    } else {
-                        Text(CopyTimeFormat.label(for: item.date))
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                            .fixedSize()
-                    }
-                }
-                .padding(.top, 1)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .padding(.trailing, isHovered && !didCopy ? hoverButtonsWidth : 0)
-            .background(isHovered ? Color.white.opacity(0.12) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .contentShape(Rectangle())
-            .onDrag(dragProvider)
-            .onTapGesture { handleTap() }
+        HStack(alignment: .top, spacing: 8) {
+            contentView
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { handleTap() }
 
-            if isHovered && !didCopy {
-                HStack(spacing: 2) {
-                    if let url = urlIfPresent {
-                        HoverIconButton(systemName: "arrow.up.right.square", help: "Open URL") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
-                    if case .text = item.content {
-                        HoverIconButton(
-                            systemName: didBookmark ? "bookmark.fill" : "bookmark",
-                            help: "Save to Notes",
-                            color: didBookmark ? .accentColor : .secondary
-                        ) {
-                            onSaveToNotes()
-                            didBookmark = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-                                didBookmark = false
-                            }
-                        }
-                    }
-                    HoverIconButton(
-                        systemName: item.isPinned ? "pin.slash.fill" : "pin.fill",
-                        help: item.isPinned ? "Unpin" : "Pin",
-                        rotation: item.isPinned ? 0 : 45,
-                        color: item.isPinned ? .accentColor : .secondary
-                    ) { onTogglePin() }
-                    HoverIconButton(systemName: "xmark.circle.fill", help: "Delete") {
-                        onDelete()
+            trailingColumn
+                .frame(minWidth: trailingColumnMinWidth, alignment: .trailing)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(rowBackground)
+        .overlay(departingOverlay)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .offset(x: isDeparting ? 52 : 0, y: isDeparting ? -6 : 0)
+        .scaleEffect(isDeparting ? 0.9 : 1, anchor: .leading)
+        .opacity(isDeparting ? 0 : 1)
+        .animation(.easeInOut(duration: 0.42), value: isDeparting)
+        .onDrag(dragProvider)
+        .onHover { hovering in
+            if !isDeparting { isHovered = hovering }
+        }
+        .allowsHitTesting(!isDeparting)
+    }
+
+    private var rowBackground: Color {
+        if isDeparting { return Color.accentColor.opacity(0.14) }
+        return isHovered ? Color.white.opacity(0.12) : .clear
+    }
+
+    @ViewBuilder
+    private var departingOverlay: some View {
+        if isDeparting {
+            HStack(spacing: 4) {
+                Image(systemName: "note.text")
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 10, weight: .bold))
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(.accentColor)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+            .padding(.trailing, 12)
+            .transition(.opacity.combined(with: .scale(scale: 0.85)))
+        }
+    }
+
+    @ViewBuilder
+    private var trailingColumn: some View {
+        if isHovered && !didCopy {
+            HStack(spacing: 2) {
+                if let url = urlIfPresent {
+                    HoverIconButton(systemName: "arrow.up.right.square", help: "Open URL") {
+                        NSWorkspace.shared.open(url)
                     }
                 }
-                .padding(.top, 4)
-                .padding(.trailing, 4)
+                if canSaveToNotes {
+                    HoverIconButton(
+                        systemName: "bookmark.fill",
+                        help: "Move to Notes",
+                        color: .accentColor
+                    ) {
+                        onSaveToNotes()
+                    }
+                }
+                HoverIconButton(
+                    systemName: item.isPinned ? "pin.slash.fill" : "pin.fill",
+                    help: item.isPinned ? "Unpin" : "Pin",
+                    rotation: item.isPinned ? 0 : 45,
+                    color: item.isPinned ? .accentColor : .secondary
+                ) { onTogglePin() }
+                HoverIconButton(systemName: "xmark.circle.fill", help: "Delete") {
+                    onDelete()
+                }
             }
+            .padding(.top, 1)
+        } else {
+            VStack(alignment: .trailing, spacing: 4) {
+                if !didCopy && item.isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 9))
+                        .rotationEffect(.degrees(-25))
+                        .foregroundColor(.accentColor)
+                }
+                if didCopy {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.green)
+                } else {
+                    Text(CopyTimeFormat.label(for: item.date))
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .fixedSize()
+                }
+            }
+            .padding(.top, 1)
         }
-        .onHover { hovering in isHovered = hovering }
+    }
+
+    private var canSaveToNotes: Bool {
+        switch item.content {
+        case .text(let text):
+            return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .image:
+            return !(item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        }
+    }
+
+    private var trailingColumnMinWidth: CGFloat {
+        if isHovered && !didCopy { return hoverButtonsWidth }
+        return 36
     }
 
     private var hoverButtonsWidth: CGFloat {
         var w: CGFloat = 44  // pin + delete
-        if case .text = item.content { w += 22 }  // bookmark
-        if urlIfPresent != nil { w += 22 }  // open URL
+        if canSaveToNotes { w += 22 }
+        if urlIfPresent != nil { w += 22 }
         return w
     }
 
@@ -754,6 +840,7 @@ struct HoverIconButton: View {
 struct NoteRow: View {
     let note: Note
     let searchQuery: String
+    let isHighlighted: Bool
     let onTap: () -> Void
     let onSave: (String) -> Void
     let onDelete: () -> Void
@@ -799,7 +886,11 @@ struct NoteRow: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .padding(.trailing, isHovered && !didCopy ? 44 : 0)
-            .background(isHovered ? Color.white.opacity(0.12) : Color.clear)
+            .background(noteRowBackground)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isHighlighted ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1.5)
+            )
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
             .onTapGesture {
@@ -808,6 +899,7 @@ struct NoteRow: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { didCopy = false }
             }
             .help(note.text)
+            .animation(.easeInOut(duration: 0.35), value: isHighlighted)
 
             if isHovered && !didCopy {
                 HStack(spacing: 2) {
@@ -828,6 +920,12 @@ struct NoteRow: View {
     private var displayedText: String {
         let trimmed = note.text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? note.text : trimmed
+    }
+
+    private var noteRowBackground: Color {
+        if isHighlighted { return Color.accentColor.opacity(0.2) }
+        if isHovered { return Color.white.opacity(0.12) }
+        return .clear
     }
 }
 
@@ -948,7 +1046,7 @@ struct InfoView: View {
             featureRow("keyboard", "⌃⌘V toggles the panel from anywhere")
             featureRow("magnifyingglass", "Search across text and image OCR (auto-focused on hotkey)")
             featureRow("note.text", "Notes sub-tab: persistent text snippets, never wiped by Clear Temp")
-            featureRow("bookmark", "Bookmark icon on a Temp row promotes it to Notes")
+            featureRow("bookmark", "Bookmark on a Temp row moves it to Notes (removed from Temp)")
             featureRow("pin.fill", "Pin items so they survive Clear and never expire")
             featureRow("text.viewfinder", "Images get OCR'd in the background — search inside screenshots")
             featureRow("hand.draw", "Drag images and text in/out of the panel")

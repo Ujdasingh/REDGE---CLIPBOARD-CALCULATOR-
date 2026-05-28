@@ -107,10 +107,13 @@ final class ClipboardManager: ObservableObject {
         return notes.filter { $0.text.lowercased().contains(q) }
     }
 
-    func addNote(text: String) {
+    @discardableResult
+    func addNote(text: String) -> Note? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        notes.insert(Note(text: trimmed), at: 0)
+        guard !trimmed.isEmpty else { return nil }
+        let note = Note(text: trimmed)
+        notes.insert(note, at: 0)
+        return note
     }
 
     func updateNote(id: UUID, text: String) {
@@ -123,11 +126,21 @@ final class ClipboardManager: ObservableObject {
         notes.removeAll { $0.id == id }
     }
 
-    /// Promote a Temp text item to a permanent Note.
-    func saveItemToNotes(_ item: ClipboardItem) {
-        if case .text(let text) = item.content {
-            addNote(text: text)
+    /// Move a Temp item into Notes and remove it from clipboard history.
+    @discardableResult
+    func moveItemToNotes(_ item: ClipboardItem) -> Note? {
+        let textToSave: String?
+        switch item.content {
+        case .text(let text):
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            textToSave = trimmed.isEmpty ? nil : trimmed
+        case .image:
+            let ocr = item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            textToSave = ocr.isEmpty ? nil : ocr
         }
+        guard let text = textToSave, let note = addNote(text: text) else { return nil }
+        remove(item)
+        return note
     }
 
     func requestSearchFocus() {
