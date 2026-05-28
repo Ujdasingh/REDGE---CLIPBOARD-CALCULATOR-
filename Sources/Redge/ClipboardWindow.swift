@@ -378,21 +378,7 @@ struct ClipboardContentView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Add note")
-                .popover(isPresented: $isAddingNote, arrowEdge: .bottom) {
-                    NoteEditor(
-                        title: "New Note",
-                        text: $newNoteText,
-                        onSave: {
-                            clipboardManager.addNote(text: newNoteText)
-                            newNoteText = ""
-                            isAddingNote = false
-                        },
-                        onCancel: {
-                            newNoteText = ""
-                            isAddingNote = false
-                        }
-                    )
-                }
+                .disabled(isAddingNote)
             }
             if subTab == .temp && !clipboardManager.history.isEmpty {
                 Button(action: onClear) {
@@ -451,21 +437,38 @@ struct ClipboardContentView: View {
 
     @ViewBuilder
     private var notesContentArea: some View {
-        if clipboardManager.notes.isEmpty {
-            emptyView(
-                icon: "note.text",
-                title: "No notes yet",
-                subtitle: "Tap + to add — or click the bookmark on any Temp row to save it here. Notes persist forever, never cleared by Clear Temp."
-            )
-        } else if clipboardManager.filteredNotes.isEmpty {
-            emptyView(
-                icon: "magnifyingglass",
-                title: "No matches",
-                subtitle: "Try a different search"
-            )
-        } else {
-            ScrollView {
-                LazyVStack(spacing: 4) {
+        ScrollView {
+            LazyVStack(spacing: 4) {
+                if isAddingNote {
+                    InlineNoteEditor(
+                        title: "New Note",
+                        initialText: newNoteText,
+                        onSave: { saved in
+                            clipboardManager.addNote(text: saved)
+                            newNoteText = ""
+                            isAddingNote = false
+                        },
+                        onCancel: {
+                            newNoteText = ""
+                            isAddingNote = false
+                        }
+                    )
+                }
+                if clipboardManager.notes.isEmpty && !isAddingNote {
+                    emptyView(
+                        icon: "note.text",
+                        title: "No notes yet",
+                        subtitle: "Tap + to add — or click the bookmark on any Temp row to save it here. Notes persist forever, never cleared by Clear Temp."
+                    )
+                    .frame(minHeight: 320)
+                } else if !clipboardManager.notes.isEmpty && clipboardManager.filteredNotes.isEmpty && !isAddingNote {
+                    emptyView(
+                        icon: "magnifyingglass",
+                        title: "No matches",
+                        subtitle: "Try a different search"
+                    )
+                    .frame(minHeight: 240)
+                } else {
                     ForEach(clipboardManager.filteredNotes) { note in
                         NoteRow(
                             note: note,
@@ -480,9 +483,9 @@ struct ClipboardContentView: View {
                         )
                     }
                 }
-                .padding(.vertical, 6)
-                .padding(.horizontal, 6)
             }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 6)
         }
     }
 
@@ -506,6 +509,34 @@ struct ClipboardContentView: View {
     }
 }
 
+private enum CopyTimeFormat {
+    static func label(for date: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm"
+            return formatter.string(from: date)
+        }
+        let day = calendar.component(.day, from: date)
+        let monthFormatter = DateFormatter()
+        monthFormatter.dateFormat = "MMM"
+        return "\(day)\(ordinalSuffix(day)) \(monthFormatter.string(from: date))"
+    }
+
+    private static func ordinalSuffix(_ day: Int) -> String {
+        switch day {
+        case 11...13: return "th"
+        default:
+            switch day % 10 {
+            case 1: return "st"
+            case 2: return "nd"
+            case 3: return "rd"
+            default: return "th"
+            }
+        }
+    }
+}
+
 struct ClipboardRow: View {
     let item: ClipboardItem
     let searchQuery: String
@@ -522,12 +553,25 @@ struct ClipboardRow: View {
             HStack(alignment: .top, spacing: 8) {
                 contentView
                     .frame(maxWidth: .infinity, alignment: .leading)
-                if didCopy {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(.green)
-                        .padding(.top, 2)
+                VStack(alignment: .trailing, spacing: 4) {
+                    if !isHovered && !didCopy && item.isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 9))
+                            .rotationEffect(.degrees(-25))
+                            .foregroundColor(.accentColor)
+                    }
+                    if didCopy {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.green)
+                    } else {
+                        Text(CopyTimeFormat.label(for: item.date))
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .fixedSize()
+                    }
                 }
+                .padding(.top, 1)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -537,15 +581,6 @@ struct ClipboardRow: View {
             .contentShape(Rectangle())
             .onDrag(dragProvider)
             .onTapGesture { handleTap() }
-
-            if !isHovered && !didCopy && item.isPinned {
-                Image(systemName: "pin.fill")
-                    .font(.system(size: 9))
-                    .rotationEffect(.degrees(-25))
-                    .foregroundColor(.accentColor)
-                    .padding(.top, 6)
-                    .padding(.trailing, 8)
-            }
 
             if isHovered && !didCopy {
                 HStack(spacing: 2) {
@@ -725,9 +760,24 @@ struct NoteRow: View {
     @State private var isHovered = false
     @State private var didCopy = false
     @State private var isEditing = false
-    @State private var editText = ""
 
     var body: some View {
+        if isEditing {
+            InlineNoteEditor(
+                title: "Edit Note",
+                initialText: note.text,
+                onSave: { saved in
+                    onSave(saved)
+                    isEditing = false
+                },
+                onCancel: { isEditing = false }
+            )
+        } else {
+            displayRow
+        }
+    }
+
+    private var displayRow: some View {
         ZStack(alignment: .topTrailing) {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "note.text")
@@ -762,19 +812,7 @@ struct NoteRow: View {
             if isHovered && !didCopy {
                 HStack(spacing: 2) {
                     HoverIconButton(systemName: "pencil", help: "Edit") {
-                        editText = note.text
                         isEditing = true
-                    }
-                    .popover(isPresented: $isEditing, arrowEdge: .bottom) {
-                        NoteEditor(
-                            title: "Edit Note",
-                            text: $editText,
-                            onSave: {
-                                onSave(editText)
-                                isEditing = false
-                            },
-                            onCancel: { isEditing = false }
-                        )
                     }
                     HoverIconButton(systemName: "xmark.circle.fill", help: "Delete") {
                         onDelete()
@@ -793,26 +831,38 @@ struct NoteRow: View {
     }
 }
 
-struct NoteEditor: View {
+/// Inline editor that lives inside the panel itself (not in a popover).
+/// Popovers anchored on a non-activating panel have known SwiftUI issues
+/// where TextEditor accepts typing but ⌘V paste falls through. Inline avoids
+/// that whole class of bug because the panel handles keys correctly.
+struct InlineNoteEditor: View {
     let title: String
-    @Binding var text: String
-    let onSave: () -> Void
+    let initialText: String
+    let onSave: (String) -> Void
     let onCancel: () -> Void
+
+    @State private var text: String = ""
     @FocusState private var editorFocused: Bool
 
+    init(title: String, initialText: String,
+         onSave: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
+        self.title = title
+        self.initialText = initialText
+        self.onSave = onSave
+        self.onCancel = onCancel
+        _text = State(initialValue: initialText)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "note.text")
+                    .font(.system(size: 11))
+                    .foregroundColor(.accentColor)
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
                 Spacer()
-                Button(action: onCancel) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10))
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(.secondary)
-                .help("Cancel")
             }
             TextEditor(text: $text)
                 .font(.system(size: 12))
@@ -820,21 +870,35 @@ struct NoteEditor: View {
                 .padding(6)
                 .background(Color.white.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
-                .frame(width: 280, height: 160)
+                .frame(minHeight: 90, maxHeight: 220)
                 .focused($editorFocused)
             HStack {
+                Text("⌘↩ to save · esc to cancel")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary.opacity(0.7))
                 Spacer()
                 Button("Cancel", action: onCancel)
+                    .controlSize(.small)
                     .keyboardShortcut(.escape, modifiers: [])
-                Button("Save", action: onSave)
+                Button("Save") { onSave(text) }
+                    .controlSize(.small)
                     .keyboardShortcut(.return, modifiers: .command)
                     .buttonStyle(.borderedProminent)
                     .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .padding(12)
-        .frame(width: 304)
-        .onAppear { editorFocused = true }
+        .padding(8)
+        .background(Color.accentColor.opacity(0.06))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                editorFocused = true
+            }
+        }
     }
 }
 
