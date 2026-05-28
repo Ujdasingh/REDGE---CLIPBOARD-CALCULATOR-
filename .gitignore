@@ -16,3 +16,5 @@ Package.resolved
 Redge.app/
 Redge.icns
 Redge.iconset/
+dmg-staging/
+*.dmg

@@ -43,6 +43,24 @@ open /Applications/Redge.app
 
 The build script generates the icon, builds the binary, ad-hoc signs the bundle, and attaches a custom icon attribute via `NSWorkspace.setIcon` (Finder reads this directly — no daemon caching to fight).
 
+### Share as a DMG
+
+To build a disk image you can send to others (drag **Redge.app** → **Applications**):
+
+```bash
+./create-dmg.sh
+```
+
+Output: `Redge-1.0.dmg` in the project folder. Recipients open the DMG and drag the app to Applications.
+
+If you already built the app and only need to repackage:
+
+```bash
+SKIP_BUILD=1 ./create-dmg.sh
+```
+
+Because the app is ad-hoc signed, recipients may need **System Settings → Privacy & Security → Open Anyway** on first launch, or right-click → **Open**.
+
 ---
 
 ## Usage
