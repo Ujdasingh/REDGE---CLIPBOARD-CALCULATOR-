@@ -34,8 +34,8 @@ Bonus: it OCRs your screenshots so you can search inside images, has a built-in 
 Requires macOS 13+ and Xcode Command Line Tools (`xcode-select --install`).
 
 ```bash
-git clone https://github.com/<your-username>/Redge.git
-cd Redge
+git clone https://github.com/Ujdasingh/REDGE---CLIPBOARD-CALCULATOR-.git
+cd REDGE---CLIPBOARD-CALCULATOR-
 ./build-app.sh
 mv Redge.app /Applications/
 open /Applications/Redge.app
