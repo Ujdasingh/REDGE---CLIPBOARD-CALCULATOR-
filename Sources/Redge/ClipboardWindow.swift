@@ -15,7 +15,7 @@ final class ClipboardWindow {
     private var previousApp: NSRunningApplication?
     private var keyMonitor: Any?
 
-    private let windowWidth: CGFloat = 320
+    private let windowWidth: CGFloat = 340
     private let windowHeight: CGFloat = 580
     private let edgeInset: CGFloat = 8
 
@@ -116,6 +116,10 @@ final class ClipboardWindow {
                 }
                 // Hosted SwiftUI text fields surface as NSTextView's field editor
                 // — covered above. The hosting view itself is fine to intercept past.
+            }
+            if event.keyCode == 53 { // Escape
+                self.hide()
+                return nil
             }
             if self.calcState.handleKey(event) {
                 return nil  // consume — don't beep
@@ -391,7 +395,7 @@ struct ClipboardContentView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
-            TextField(subTab == .temp ? "Search text and image content…" : "Search notes…",
+            TextField(subTab == .temp ? "Search clipboard…" : "Search notes…",
                       text: $clipboardManager.searchQuery)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
@@ -442,7 +446,7 @@ struct ClipboardContentView: View {
             emptyView(
                 icon: "doc.on.clipboard",
                 title: "Nothing copied yet",
-                subtitle: "Copy or drop text and images here"
+                subtitle: "Copy text or images — they appear here instantly"
             )
         } else if clipboardManager.filteredHistory.isEmpty {
             emptyView(
@@ -499,7 +503,7 @@ struct ClipboardContentView: View {
                     emptyView(
                         icon: "note.text",
                         title: "No notes yet",
-                        subtitle: "Tap + to add — or click the bookmark on any Temp row to move it here. Notes persist forever, never cleared by Clear Temp."
+                        subtitle: "Tap + to write one, or bookmark a Temp row to move it here. Notes stay forever — Clear Temp never touches them."
                     )
                     .frame(minHeight: 320)
                 } else if !clipboardManager.notes.isEmpty && clipboardManager.filteredNotes.isEmpty && !isAddingNote {
@@ -561,10 +565,17 @@ private enum CopyTimeFormat {
             formatter.dateFormat = "HH:mm"
             return formatter.string(from: date)
         }
+        if calendar.isDateInYesterday(date) {
+            return "Yesterday"
+        }
         let day = calendar.component(.day, from: date)
         let monthFormatter = DateFormatter()
         monthFormatter.dateFormat = "MMM"
-        return "\(day)\(ordinalSuffix(day)) \(monthFormatter.string(from: date))"
+        let month = monthFormatter.string(from: date)
+        if calendar.component(.year, from: date) == calendar.component(.year, from: Date()) {
+            return "\(day)\(ordinalSuffix(day)) \(month)"
+        }
+        return "\(day)\(ordinalSuffix(day)) \(month) \(calendar.component(.year, from: date))"
     }
 
     private static func ordinalSuffix(_ day: Int) -> String {
@@ -579,6 +590,19 @@ private enum CopyTimeFormat {
             }
         }
     }
+}
+
+private func highlightedText(_ text: String, query: String) -> Text {
+    let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !q.isEmpty else { return Text(text) }
+    var result = Text("")
+    var remainder = text[...]
+    while let range = remainder.range(of: q, options: .caseInsensitive) {
+        result = result + Text(String(remainder[..<range.lowerBound]))
+        result = result + Text(String(remainder[range])).foregroundColor(.accentColor).fontWeight(.semibold)
+        remainder = remainder[range.upperBound...]
+    }
+    return result + Text(String(remainder))
 }
 
 struct ClipboardRow: View {
@@ -682,8 +706,9 @@ struct ClipboardRow: View {
                         .foregroundColor(.green)
                 } else {
                     Text(CopyTimeFormat.label(for: item.date))
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(.secondary.opacity(0.9))
                         .fixedSize()
                 }
             }
@@ -731,7 +756,7 @@ struct ClipboardRow: View {
                         .foregroundColor(.accentColor)
                         .padding(.top, 1)
                 }
-                Text(trimmed.isEmpty ? text : trimmed)
+                highlightedText(trimmed.isEmpty ? text : trimmed, query: searchQuery)
                     .lineLimit(3)
                     .font(.system(size: 12))
                     .foregroundColor(.primary)
@@ -762,7 +787,7 @@ struct ClipboardRow: View {
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                         if let snippet = ocrSnippet {
-                            Text(snippet)
+                            highlightedText(snippet, query: searchQuery)
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary.opacity(0.85))
                                 .lineLimit(2)
@@ -865,41 +890,22 @@ struct NoteRow: View {
     }
 
     private var displayRow: some View {
-        ZStack(alignment: .topTrailing) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "note.text")
-                    .font(.system(size: 11))
-                    .foregroundColor(.accentColor.opacity(0.85))
-                    .padding(.top, 2)
-                Text(displayedText)
-                    .font(.system(size: 12))
-                    .foregroundColor(.primary)
-                    .lineLimit(4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if didCopy {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(.green)
-                        .padding(.top, 2)
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "note.text")
+                .font(.system(size: 11))
+                .foregroundColor(.accentColor.opacity(0.85))
+                .padding(.top, 2)
+            highlightedText(displayedText, query: searchQuery)
+                .font(.system(size: 12))
+                .foregroundColor(.primary)
+                .lineLimit(4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    onTap()
+                    didCopy = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { didCopy = false }
                 }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .padding(.trailing, isHovered && !didCopy ? 44 : 0)
-            .background(noteRowBackground)
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(isHighlighted ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1.5)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .contentShape(Rectangle())
-            .onTapGesture {
-                onTap()
-                didCopy = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { didCopy = false }
-            }
-            .help(note.text)
-            .animation(.easeInOut(duration: 0.35), value: isHighlighted)
 
             if isHovered && !didCopy {
                 HStack(spacing: 2) {
@@ -910,10 +916,34 @@ struct NoteRow: View {
                         onDelete()
                     }
                 }
-                .padding(.top, 4)
-                .padding(.trailing, 4)
+                .padding(.top, 1)
+            } else {
+                VStack(alignment: .trailing, spacing: 4) {
+                    if didCopy {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.green)
+                    } else {
+                        Text(CopyTimeFormat.label(for: note.updatedAt))
+                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(.secondary.opacity(0.9))
+                            .fixedSize()
+                    }
+                }
+                .padding(.top, 1)
             }
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(noteRowBackground)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isHighlighted ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .help(note.text)
+        .animation(.easeInOut(duration: 0.35), value: isHighlighted)
         .onHover { hovering in isHovered = hovering }
     }
 
@@ -975,6 +1005,10 @@ struct InlineNoteEditor: View {
                     .font(.system(size: 9))
                     .foregroundColor(.secondary.opacity(0.7))
                 Spacer()
+                Text("\(text.count)")
+                    .font(.system(size: 9, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundColor(.secondary.opacity(0.55))
                 Button("Cancel", action: onCancel)
                     .controlSize(.small)
                     .keyboardShortcut(.escape, modifiers: [])
@@ -1053,7 +1087,7 @@ struct InfoView: View {
             featureRow("function", "Calculator + length / weight / temperature / storage converter")
             featureRow("lock.shield", "Passwords from password managers are skipped automatically")
             featureRow("hand.tap", "Auto-paste on click (toggle below — needs Accessibility)")
-            featureRow("arrow.clockwise", "History persists across restarts")
+            featureRow("escape", "Esc closes the panel (when you are not typing)")
             featureRow("power", "Launch at Login from the menu-bar icon")
         }
         .padding(12)

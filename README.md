@@ -18,6 +18,8 @@ Bonus: it OCRs your screenshots so you can search inside images, has a built-in 
 | **Text + images** | Captures both. Image rows show a thumbnail and dimensions. |
 | **OCR search** | Every image gets OCR'd by Vision in the background. Search matches text *inside* screenshots. |
 | **Pin items** | Hover any row → pin icon. Pinned items survive Clear and never expire. |
+| **Notes** | Bookmark a Temp row to move it into persistent Notes. Notes never expire. |
+| **Copy time** | Each row shows when it was copied — time today, date otherwise. |
 | **Drag in / out** | Drop images or text onto the panel. Drag any row out into Mail / Notes / Slack / Figma. |
 | **Auto-paste** | Optional: click an item → simulates `⌘V` into the previously-focused app. Requires Accessibility. |
 | **Calculator** | Basic 4-function calc with running expression line and 20-entry history. Full keyboard input (digits, `+ - * / =`, Enter, Backspace, Escape). Click any history row to recall. |

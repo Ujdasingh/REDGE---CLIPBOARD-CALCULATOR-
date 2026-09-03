@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 
 APP_NAME="Redge"
-VERSION="1.0"
+VERSION="1.1"
 DMG_FILE="${APP_NAME}-${VERSION}.dmg"
 STAGING="dmg-staging"
 VOLUME_NAME="${APP_NAME}"

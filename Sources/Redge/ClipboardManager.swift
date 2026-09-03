@@ -111,6 +111,12 @@ final class ClipboardManager: ObservableObject {
     func addNote(text: String) -> Note? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+        if let existingIdx = notes.firstIndex(where: { $0.text == trimmed }) {
+            var existing = notes.remove(at: existingIdx)
+            existing.updatedAt = Date()
+            notes.insert(existing, at: 0)
+            return existing
+        }
         let note = Note(text: trimmed)
         notes.insert(note, at: 0)
         return note
@@ -301,5 +307,9 @@ final class ClipboardManager: ObservableObject {
                 pasteboard.writeObjects([image])
             }
         }
+        // Mark as transient so Redge does not re-ingest its own copies
+        // (which would bump the row to the top and rewrite the timestamp).
+        pasteboard.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+        lastChangeCount = pasteboard.changeCount
     }
 }
