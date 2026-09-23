@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 
 APP_NAME="Redge"
-VERSION="1.1"
+VERSION="2.1.2"
 DMG_FILE="${APP_NAME}-${VERSION}.dmg"
 STAGING="dmg-staging"
 VOLUME_NAME="${APP_NAME}"
@@ -38,9 +38,11 @@ Install Redge
 
 Usage
 -----
-• Slide your cursor to the right edge of the screen to open the panel.
-• Press Control+Command+V to toggle the panel.
-• Redge lives in the menu bar (clipboard icon).
+• Slide your cursor to the screen edge (right by default; change in Settings) to open the panel.
+• Press Control+Command+V to toggle the panel (customizable).
+• Click a clip to fill the selected Excel/Numbers cell when Auto-paste is on.
+• Repeat (⌘⌥R) is off until you enable it in Settings.
+• Redge lives in the menu bar.
 
 Requires macOS 13 or later.
 EOF
@@ -58,8 +60,12 @@ hdiutil create \
 
 rm -rf "$STAGING"
 
-# Ad-hoc sign the DMG (optional; helps some Gatekeeper paths)
-codesign --force --sign - "$DMG_FILE" 2>/dev/null || true
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
+  codesign --force --sign "Developer ID Application" "$DMG_FILE" 2>/dev/null || true
+else
+  codesign --force --sign "Redge Developer" "$DMG_FILE" 2>/dev/null \
+    || codesign --force --sign - "$DMG_FILE" 2>/dev/null || true
+fi
 
 echo ""
 echo "Done: $(pwd)/$DMG_FILE"

@@ -5,6 +5,7 @@ import Vision
 enum ClipboardContent: Equatable {
     case text(String)
     case image(Data)
+    case file(String)
 }
 
 struct ClipboardItem: Identifiable, Equatable {
@@ -28,31 +29,51 @@ struct ClipboardItem: Identifiable, Equatable {
 /// Clear-history on the Temp tab. Manually managed by the user.
 struct Note: Identifiable, Equatable, Codable {
     let id: UUID
+    var title: String?
     var text: String
     let createdAt: Date
     var updatedAt: Date
 
-    init(id: UUID = UUID(), text: String, createdAt: Date = Date(), updatedAt: Date? = nil) {
+    init(id: UUID = UUID(), title: String? = nil, text: String,
+         createdAt: Date = Date(), updatedAt: Date? = nil) {
         self.id = id
+        self.title = Self.normalizedTitle(title)
         self.text = text
         self.createdAt = createdAt
         self.updatedAt = updatedAt ?? createdAt
     }
+
+    var displayTitle: String {
+        if let title, !title.isEmpty { return title }
+        let first = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        let trimmed = first.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.count <= 40 { return trimmed }
+        return String(trimmed.prefix(39)) + "…"
+    }
+
+    static func normalizedTitle(_ title: String?) -> String? {
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }
 
 final class ClipboardManager: ObservableObject {
+    static weak var shared: ClipboardManager?
+
     @Published private(set) var history: [ClipboardItem] = []
     @Published private(set) var notes: [Note] = []
+    @Published private(set) var recentFills: [String] = []
     @Published var isFrozen: Bool = false
     @Published var searchQuery: String = ""
     @Published var searchFocusRequest: Int = 0
 
     private var timer: Timer?
     private var lastChangeCount: Int
-    private let maxHistory = 50
     private let pollInterval: TimeInterval = 0.5
     private let store = PersistenceStore()
     private var cancellables = Set<AnyCancellable>()
+    private static let recentFillsKey = "recentFills"
+    private static let maxRecentFills = 8
 
     static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "heic", "webp"]
     private static let skipPasteboardTypes: [NSPasteboard.PasteboardType] = [
@@ -61,10 +82,16 @@ final class ClipboardManager: ObservableObject {
         NSPasteboard.PasteboardType("org.nspasteboard.TransientType"),
     ]
 
+    private var maxHistory: Int {
+        max(10, min(200, AppSettings.shared.historyLimit))
+    }
+
     init() {
         lastChangeCount = NSPasteboard.general.changeCount
         history = store.load()
         notes = store.loadNotes()
+        recentFills = UserDefaults.standard.stringArray(forKey: Self.recentFillsKey) ?? []
+        ClipboardManager.shared = self
 
         $history
             .dropFirst()
@@ -79,6 +106,13 @@ final class ClipboardManager: ObservableObject {
             .debounce(for: .seconds(0.6), scheduler: DispatchQueue.main)
             .sink { [weak self] n in
                 self?.store.saveNotes(n)
+            }
+            .store(in: &cancellables)
+
+        AppSettings.shared.$historyLimit
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.enforceMaxHistory()
             }
             .store(in: &cancellables)
     }
@@ -97,6 +131,7 @@ final class ClipboardManager: ObservableObject {
     func flushSave() {
         store.save(history)
         store.saveNotes(notes)
+        UserDefaults.standard.set(recentFills, forKey: Self.recentFillsKey)
     }
 
     // MARK: - Notes
@@ -104,27 +139,31 @@ final class ClipboardManager: ObservableObject {
     var filteredNotes: [Note] {
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if q.isEmpty { return notes }
-        return notes.filter { $0.text.lowercased().contains(q) }
+        return notes.filter {
+            $0.text.lowercased().contains(q) || ($0.title?.lowercased().contains(q) ?? false)
+        }
     }
 
     @discardableResult
-    func addNote(text: String) -> Note? {
+    func addNote(text: String, title: String? = nil) -> Note? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        if let existingIdx = notes.firstIndex(where: { $0.text == trimmed }) {
+        let cleanTitle = Note.normalizedTitle(title)
+        if let existingIdx = notes.firstIndex(where: { $0.text == trimmed && $0.title == cleanTitle }) {
             var existing = notes.remove(at: existingIdx)
             existing.updatedAt = Date()
             notes.insert(existing, at: 0)
             return existing
         }
-        let note = Note(text: trimmed)
+        let note = Note(title: cleanTitle, text: trimmed)
         notes.insert(note, at: 0)
         return note
     }
 
-    func updateNote(id: UUID, text: String) {
+    func updateNote(id: UUID, text: String, title: String? = nil) {
         guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
         notes[idx].text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        notes[idx].title = Note.normalizedTitle(title)
         notes[idx].updatedAt = Date()
     }
 
@@ -140,17 +179,47 @@ final class ClipboardManager: ObservableObject {
         case .text(let text):
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             textToSave = trimmed.isEmpty ? nil : trimmed
+        case .file(let path):
+            textToSave = path
         case .image:
             let ocr = item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             textToSave = ocr.isEmpty ? nil : ocr
         }
-        guard let text = textToSave, let note = addNote(text: text) else { return nil }
+        guard let text = textToSave else { return nil }
+        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init)
+        guard let note = addNote(text: text, title: firstLine) else { return nil }
         remove(item)
         return note
     }
 
+    func exportNotes(to url: URL) {
+        store.exportNotes(notes, to: url)
+    }
+
+    func importNotes(from url: URL) {
+        let incoming = store.importNotes(from: url)
+        guard !incoming.isEmpty else { return }
+        for note in incoming.reversed() {
+            if notes.contains(where: { $0.id == note.id || $0.text == note.text }) {
+                continue
+            }
+            notes.insert(note, at: 0)
+        }
+    }
+
     func requestSearchFocus() {
         searchFocusRequest += 1
+    }
+
+    func recordFill(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        recentFills.removeAll { $0 == trimmed }
+        recentFills.insert(trimmed, at: 0)
+        if recentFills.count > Self.maxRecentFills {
+            recentFills = Array(recentFills.prefix(Self.maxRecentFills))
+        }
+        UserDefaults.standard.set(recentFills, forKey: Self.recentFillsKey)
     }
 
     var filteredHistory: [ClipboardItem] {
@@ -163,6 +232,8 @@ final class ClipboardManager: ObservableObject {
                 switch item.content {
                 case .text(let text):
                     return text.lowercased().contains(query)
+                case .file(let path):
+                    return path.lowercased().contains(query)
                 case .image:
                     return item.ocrText?.lowercased().contains(query) ?? false
                 }
@@ -185,9 +256,28 @@ final class ClipboardManager: ObservableObject {
 
         if let imageData = readImageData(from: pasteboard) {
             insert(.image(imageData))
-        } else if let text = pasteboard.string(forType: .string), !text.isEmpty {
+            return
+        }
+        if let path = readFilePath(from: pasteboard) {
+            insert(.file(path))
+            return
+        }
+        if let text = pasteboard.string(forType: .string), !text.isEmpty {
             insert(.text(text))
         }
+    }
+
+    private func readFilePath(from pasteboard: NSPasteboard) -> String? {
+        guard let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] else {
+            return nil
+        }
+        let files = urls.filter { $0.isFileURL }
+        guard let first = files.first else { return nil }
+        if files.count == 1,
+           ClipboardManager.imageExtensions.contains(first.pathExtension.lowercased()) {
+            return nil
+        }
+        return first.path
     }
 
     private func readImageData(from pasteboard: NSPasteboard) -> Data? {
@@ -282,6 +372,11 @@ final class ClipboardManager: ObservableObject {
         insert(.image(imageData))
     }
 
+    func add(filePath: String) {
+        guard !filePath.isEmpty else { return }
+        insert(.file(filePath))
+    }
+
     func clearHistory() {
         history.removeAll { !$0.isPinned }
     }
@@ -302,14 +397,18 @@ final class ClipboardManager: ObservableObject {
         switch content {
         case .text(let text):
             pasteboard.setString(text, forType: .string)
+            recordFill(text)
+        case .file(let path):
+            let url = URL(fileURLWithPath: path)
+            pasteboard.writeObjects([url as NSURL])
+            recordFill(url.lastPathComponent)
         case .image(let data):
             if let image = NSImage(data: data) {
                 pasteboard.writeObjects([image])
             }
         }
-        // Mark as transient so Redge does not re-ingest its own copies
-        // (which would bump the row to the top and rewrite the timestamp).
-        pasteboard.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+        // Skip re-ingest via changeCount only. Do not mark TransientType —
+        // Excel then ignores the system clipboard and pastes its last copy.
         lastChangeCount = pasteboard.changeCount
     }
 }

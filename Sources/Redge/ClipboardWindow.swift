@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 final class FocusableNSPanel: NSPanel {
     override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }
 
 final class ClipboardWindow {
@@ -14,6 +15,7 @@ final class ClipboardWindow {
     private var targetFrame: NSRect = .zero
     private var previousApp: NSRunningApplication?
     private var keyMonitor: Any?
+    private var hostingView: NSView?
 
     private let windowWidth: CGFloat = 340
     private let windowHeight: CGFloat = 580
@@ -44,24 +46,35 @@ final class ClipboardWindow {
             onCopy: { content in weakSelf?.handleCopy(content) },
             onDelete: { item in clipboardManager.remove(item) },
             onClear: { clipboardManager.clearHistory() },
-            onTogglePin: { item in clipboardManager.togglePin(item) }
+            onTogglePin: { item in clipboardManager.togglePin(item) },
+            onCalculatorActive: { active in
+                weakSelf?.setCalculatorKeyCapture(active)
+            }
         )
         let hostingView = NSHostingView(rootView: view)
         hostingView.frame = NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
         panel.contentView = hostingView
+        self.hostingView = hostingView
         weakSelf = self
     }
 
     func show(on screen: NSScreen) {
         if isVisible { return }
-        previousApp = NSWorkspace.shared.frontmostApplication
+        if let front = NSWorkspace.shared.frontmostApplication,
+           front.bundleIdentifier != Bundle.main.bundleIdentifier {
+            previousApp = front
+        }
         isVisible = true
         installKeyMonitor()
+        if calcState.isActive {
+            setCalculatorKeyCapture(true)
+        }
 
         let frame = screen.visibleFrame
         let yPos = frame.midY - windowHeight / 2
-        let endX = frame.maxX - windowWidth - edgeInset
-        let startX = frame.maxX
+        let fromLeft = AppSettings.shared.edgeSide == .left
+        let endX = fromLeft ? frame.minX + edgeInset : frame.maxX - windowWidth - edgeInset
+        let startX = fromLeft ? frame.minX - windowWidth : frame.maxX
 
         let endFrame = NSRect(x: endX, y: yPos, width: windowWidth, height: windowHeight)
         targetFrame = endFrame
@@ -85,7 +98,10 @@ final class ClipboardWindow {
         removeKeyMonitor()
 
         let currentFrame = panel.frame
-        let endX = currentFrame.minX + windowWidth + edgeInset + 4
+        let fromLeft = AppSettings.shared.edgeSide == .left
+        let endX = fromLeft
+            ? currentFrame.minX - windowWidth - edgeInset - 4
+            : currentFrame.minX + windowWidth + edgeInset + 4
         let endFrame = NSRect(
             x: endX, y: currentFrame.minY,
             width: windowWidth, height: windowHeight
@@ -105,24 +121,25 @@ final class ClipboardWindow {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
-            // Only handle keys when our panel is the key window — otherwise the
-            // user is in another app and we shouldn't grab their keystrokes.
-            guard event.window === self.panel else { return event }
-            // If a text field has focus (search field, converter input), let it
-            // handle the key normally.
+
+            if self.calcState.isActive && !self.calcState.converterFieldFocused {
+                // Local monitors only see this app. Steal calc keys unless they
+                // belong to another Redge window (Settings). Do not require the
+                // panel to already be key — nonactivating panels often are not.
+                let otherWindow = event.window != nil && event.window !== self.panel
+                if !otherWindow, self.calcState.handleKey(event) {
+                    return nil
+                }
+            }
+
             if let responder = self.panel.firstResponder {
                 if responder is NSText || responder is NSTextView {
                     return event
                 }
-                // Hosted SwiftUI text fields surface as NSTextView's field editor
-                // — covered above. The hosting view itself is fine to intercept past.
             }
             if event.keyCode == 53 { // Escape
                 self.hide()
                 return nil
-            }
-            if self.calcState.handleKey(event) {
-                return nil  // consume — don't beep
             }
             return event
         }
@@ -140,15 +157,32 @@ final class ClipboardWindow {
         return NSPointInRect(point, targetFrame)
     }
 
+    /// Calculator tab needs to be the key window so the number row and keypad
+    /// type into the calc instead of the previously focused app.
+    fileprivate func setCalculatorKeyCapture(_ active: Bool) {
+        panel.becomesKeyOnlyIfNeeded = !active
+        if active {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+            calcState.converterFieldFocused = false
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                NSApp.activate(ignoringOtherApps: true)
+                self.panel.makeKeyAndOrderFront(nil)
+                self.panel.makeFirstResponder(self.hostingView)
+                self.calcState.converterFieldFocused = false
+            }
+        } else {
+            panel.becomesKeyOnlyIfNeeded = true
+        }
+    }
+
     private func handleCopy(_ content: ClipboardContent) {
         clipboardManager.copy(content)
-        if AutoPaste.isEnabled() {
-            let app = previousApp
-            hide()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                AutoPaste.paste(into: app)
-            }
-        }
+        guard AutoPaste.isEnabled() else { return }
+        let app = previousApp
+        hide()
+        AutoPaste.paste(into: app, content: content)
     }
 }
 
@@ -159,6 +193,7 @@ struct PanelView: View {
     let onDelete: (ClipboardItem) -> Void
     let onClear: () -> Void
     let onTogglePin: (ClipboardItem) -> Void
+    let onCalculatorActive: (Bool) -> Void
 
     @State private var selectedTab: PanelTab = .clipboard
     @State private var isDropTarget = false
@@ -184,6 +219,8 @@ struct PanelView: View {
                 } else {
                     CalculatorView(state: calcState, onCopy: { text in
                         onCopy(.text(text))
+                    }, onBecameActive: {
+                        onCalculatorActive(true)
                     })
                 }
             }
@@ -200,6 +237,11 @@ struct PanelView: View {
         .onDrop(of: [.image, .text, .fileURL, .url], isTargeted: $isDropTarget) { providers in
             handleDrop(providers: providers)
         }
+        .onChange(of: selectedTab) { tab in
+            let calc = tab == .calculator
+            calcState.isActive = calc
+            onCalculatorActive(calc)
+        }
     }
 
     private var tabBar: some View {
@@ -213,6 +255,15 @@ struct PanelView: View {
             .labelsHidden()
             .controlSize(.small)
             .frame(maxWidth: .infinity)
+            Button(action: { SettingsWindow.shared.show() }) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 11))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(.secondary)
+            .help("Settings")
             Button(action: { clipboardManager.isFrozen.toggle() }) {
                 Image(systemName: clipboardManager.isFrozen ? "pin.fill" : "pin")
                     .font(.system(size: 11))
@@ -261,8 +312,10 @@ struct PanelView: View {
                        let image = NSImage(contentsOf: url),
                        let png = ClipboardManager.pngData(from: image) {
                         DispatchQueue.main.async { manager.add(imageData: png) }
+                    } else if url.isFileURL {
+                        DispatchQueue.main.async { manager.add(filePath: url.path) }
                     } else {
-                        DispatchQueue.main.async { manager.add(text: url.path) }
+                        DispatchQueue.main.async { manager.add(text: url.absoluteString) }
                     }
                 }
                 handled = true
@@ -457,6 +510,9 @@ struct ClipboardContentView: View {
         } else {
             ScrollView {
                 LazyVStack(spacing: 4) {
+                    if !clipboardManager.recentFills.isEmpty {
+                        recentFillsStrip
+                    }
                     ForEach(clipboardManager.filteredHistory) { item in
                         ClipboardRow(
                             item: item,
@@ -465,7 +521,11 @@ struct ClipboardContentView: View {
                             onTap: { onCopy(item.content) },
                             onDelete: { onDelete(item) },
                             onTogglePin: { onTogglePin(item) },
-                            onSaveToNotes: { moveItemToNotes(item) }
+                            onSaveToNotes: { moveItemToNotes(item) },
+                            onUseText: { text in
+                                clipboardManager.add(text: text)
+                                onCopy(.text(text))
+                            }
                         )
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .move(edge: .top)),
@@ -487,9 +547,10 @@ struct ClipboardContentView: View {
                 if isAddingNote {
                     InlineNoteEditor(
                         title: "New Note",
+                        initialTitle: "",
                         initialText: newNoteText,
-                        onSave: { saved in
-                            clipboardManager.addNote(text: saved)
+                        onSave: { noteTitle, saved in
+                            clipboardManager.addNote(text: saved, title: noteTitle)
                             newNoteText = ""
                             isAddingNote = false
                         },
@@ -520,8 +581,8 @@ struct ClipboardContentView: View {
                             searchQuery: clipboardManager.searchQuery,
                             isHighlighted: highlightNoteId == note.id,
                             onTap: { onCopy(.text(note.text)) },
-                            onSave: { newText in
-                                clipboardManager.updateNote(id: note.id, text: newText)
+                            onSave: { noteTitle, newText in
+                                clipboardManager.updateNote(id: note.id, text: newText, title: noteTitle)
                             },
                             onDelete: {
                                 clipboardManager.deleteNote(id: note.id)
@@ -535,6 +596,36 @@ struct ClipboardContentView: View {
             .padding(.horizontal, 6)
             .animation(.easeInOut(duration: 0.35), value: clipboardManager.filteredNotes.map(\.id))
         }
+    }
+
+    private var recentFillsStrip: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Recent fills")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 4)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(clipboardManager.recentFills, id: \.self) { fill in
+                        Button {
+                            onCopy(.text(fill))
+                        } label: {
+                            Text(fill)
+                                .font(.system(size: 10))
+                                .lineLimit(1)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.white.opacity(0.08))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help(fill)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.bottom, 4)
     }
 
     private func emptyView(icon: String, title: String, subtitle: String) -> some View {
@@ -592,6 +683,15 @@ private enum CopyTimeFormat {
     }
 }
 
+private func imageSizeLabel(_ size: NSSize) -> String {
+    guard size.width.isFinite, size.height.isFinite,
+          size.width >= 0, size.height >= 0,
+          size.width < 1_000_000, size.height < 1_000_000 else {
+        return "—"
+    }
+    return "\(Int(size.width.rounded()))×\(Int(size.height.rounded()))"
+}
+
 private func highlightedText(_ text: String, query: String) -> Text {
     let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !q.isEmpty else { return Text(text) }
@@ -613,6 +713,7 @@ struct ClipboardRow: View {
     let onDelete: () -> Void
     let onTogglePin: () -> Void
     let onSaveToNotes: () -> Void
+    var onUseText: (String) -> Void = { _ in }
     @State private var isHovered = false
     @State private var didCopy = false
 
@@ -636,10 +737,29 @@ struct ClipboardRow: View {
         .opacity(isDeparting ? 0 : 1)
         .animation(.easeInOut(duration: 0.42), value: isDeparting)
         .onDrag(dragProvider)
+        .contextMenu { transformMenu }
         .onHover { hovering in
             if !isDeparting { isHovered = hovering }
         }
         .allowsHitTesting(!isDeparting)
+    }
+
+    @ViewBuilder
+    private var transformMenu: some View {
+        if case .text(let text) = item.content {
+            Button("Trim") { onUseText(TextTools.trim(text)) }
+            Button("UPPERCASE") { onUseText(TextTools.upper(text)) }
+            Button("lowercase") { onUseText(TextTools.lower(text)) }
+            Button("Extract numbers") { onUseText(TextTools.extractNumbers(text)) }
+            Button("Split tabs / columns") { onUseText(TextTools.splitTabs(text)) }
+            Divider()
+        }
+        Button("Copy") { handleTap() }
+        if canSaveToNotes {
+            Button("Move to Notes") { onSaveToNotes() }
+        }
+        Button(item.isPinned ? "Unpin" : "Pin") { onTogglePin() }
+        Button("Delete") { onDelete() }
     }
 
     private var rowBackground: Color {
@@ -668,7 +788,10 @@ struct ClipboardRow: View {
         if isHovered && !didCopy {
             HStack(spacing: 2) {
                 if let url = urlIfPresent {
-                    HoverIconButton(systemName: "arrow.up.right.square", help: "Open URL") {
+                    HoverIconButton(
+                        systemName: "arrow.up.right.square",
+                        help: url.isFileURL ? "Open" : "Open URL"
+                    ) {
                         NSWorkspace.shared.open(url)
                     }
                 }
@@ -720,6 +843,8 @@ struct ClipboardRow: View {
         switch item.content {
         case .text(let text):
             return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .file(let path):
+            return !path.isEmpty
         case .image:
             return !(item.ocrText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         }
@@ -738,10 +863,14 @@ struct ClipboardRow: View {
     }
 
     private var urlIfPresent: URL? {
-        if case .text(let text) = item.content, text.isLikelyURL {
+        switch item.content {
+        case .text(let text) where text.isLikelyURL:
             return text.firstURL
+        case .file(let path):
+            return URL(fileURLWithPath: path)
+        default:
+            return nil
         }
-        return nil
     }
 
     @ViewBuilder
@@ -750,7 +879,13 @@ struct ClipboardRow: View {
         case .text(let text):
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             HStack(alignment: .top, spacing: 6) {
-                if text.isLikelyURL {
+                if let color = TextTools.hexColor(from: text) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(color)
+                        .frame(width: 12, height: 12)
+                        .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.white.opacity(0.25), lineWidth: 0.5))
+                        .padding(.top, 2)
+                } else if text.isLikelyURL {
                     Image(systemName: "globe")
                         .font(.system(size: 11))
                         .foregroundColor(.accentColor)
@@ -762,6 +897,22 @@ struct ClipboardRow: View {
                     .foregroundColor(.primary)
             }
             .help(text)
+        case .file(let path):
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "doc")
+                    .font(.system(size: 11))
+                    .foregroundColor(.accentColor)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 2) {
+                    highlightedText(URL(fileURLWithPath: path).lastPathComponent, query: searchQuery)
+                        .font(.system(size: 12, weight: .medium))
+                    Text(path)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .help(path)
         case .image(let data):
             if let nsImage = NSImage(data: data) {
                 HStack(spacing: 10) {
@@ -783,7 +934,7 @@ struct ClipboardRow: View {
                                     .help("Text recognized")
                             }
                         }
-                        Text("\(Int(nsImage.size.width))×\(Int(nsImage.size.height))")
+                        Text(imageSizeLabel(nsImage.size))
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                         if let snippet = ocrSnippet {
@@ -824,6 +975,8 @@ struct ClipboardRow: View {
         switch item.content {
         case .text(let text):
             return NSItemProvider(object: text as NSString)
+        case .file(let path):
+            return NSItemProvider(contentsOf: URL(fileURLWithPath: path)) ?? NSItemProvider()
         case .image(let data):
             if let image = NSImage(data: data) {
                 return NSItemProvider(object: image)
@@ -867,7 +1020,7 @@ struct NoteRow: View {
     let searchQuery: String
     let isHighlighted: Bool
     let onTap: () -> Void
-    let onSave: (String) -> Void
+    let onSave: (String?, String) -> Void
     let onDelete: () -> Void
     @State private var isHovered = false
     @State private var didCopy = false
@@ -877,9 +1030,10 @@ struct NoteRow: View {
         if isEditing {
             InlineNoteEditor(
                 title: "Edit Note",
+                initialTitle: note.title ?? "",
                 initialText: note.text,
-                onSave: { saved in
-                    onSave(saved)
+                onSave: { noteTitle, saved in
+                    onSave(noteTitle, saved)
                     isEditing = false
                 },
                 onCancel: { isEditing = false }
@@ -895,11 +1049,18 @@ struct NoteRow: View {
                 .font(.system(size: 11))
                 .foregroundColor(.accentColor.opacity(0.85))
                 .padding(.top, 2)
-            highlightedText(displayedText, query: searchQuery)
-                .font(.system(size: 12))
-                .foregroundColor(.primary)
-                .lineLimit(4)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                if let title = note.title, !title.isEmpty {
+                    highlightedText(title, query: searchQuery)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.primary)
+                }
+                highlightedText(displayedText, query: searchQuery)
+                    .font(.system(size: 12))
+                    .foregroundColor(.primary)
+                    .lineLimit(4)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     onTap()
@@ -965,19 +1126,23 @@ struct NoteRow: View {
 /// that whole class of bug because the panel handles keys correctly.
 struct InlineNoteEditor: View {
     let title: String
+    let initialTitle: String
     let initialText: String
-    let onSave: (String) -> Void
+    let onSave: (String?, String) -> Void
     let onCancel: () -> Void
 
+    @State private var noteTitle: String = ""
     @State private var text: String = ""
     @FocusState private var editorFocused: Bool
 
-    init(title: String, initialText: String,
-         onSave: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
+    init(title: String, initialTitle: String = "", initialText: String,
+         onSave: @escaping (String?, String) -> Void, onCancel: @escaping () -> Void) {
         self.title = title
+        self.initialTitle = initialTitle
         self.initialText = initialText
         self.onSave = onSave
         self.onCancel = onCancel
+        _noteTitle = State(initialValue: initialTitle)
         _text = State(initialValue: initialText)
     }
 
@@ -992,6 +1157,12 @@ struct InlineNoteEditor: View {
                     .foregroundColor(.secondary)
                 Spacer()
             }
+            TextField("Title (optional)", text: $noteTitle)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .padding(6)
+                .background(Color.white.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
             TextEditor(text: $text)
                 .font(.system(size: 12))
                 .scrollContentBackground(.hidden)
@@ -1012,7 +1183,7 @@ struct InlineNoteEditor: View {
                 Button("Cancel", action: onCancel)
                     .controlSize(.small)
                     .keyboardShortcut(.escape, modifiers: [])
-                Button("Save") { onSave(text) }
+                Button("Save") { onSave(noteTitle, text) }
                     .controlSize(.small)
                     .keyboardShortcut(.return, modifiers: .command)
                     .buttonStyle(.borderedProminent)
@@ -1036,7 +1207,8 @@ struct InlineNoteEditor: View {
 
 struct InfoBarView: View {
     @State private var showInfo = false
-    @AppStorage("autoPasteEnabled") private var autoPasteEnabled: Bool = false
+    @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var repeater = RepeatEngine.shared
 
     var body: some View {
         HStack(spacing: 6) {
@@ -1048,46 +1220,91 @@ struct InfoBarView: View {
             .buttonStyle(.plain)
             .help("Features")
             .popover(isPresented: $showInfo, arrowEdge: .top) {
-                InfoView().frame(width: 290)
+                InfoView().frame(width: 300)
+            }
+            Button(action: { SettingsWindow.shared.show() }) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Settings")
+            Text(appVersionLabel)
+                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .foregroundColor(.secondary.opacity(0.55))
+                .help("Redge \(appVersionLabel)")
+            if repeater.isEnabled {
+                Text(repeatStatus)
+                    .font(.system(size: 9, design: .rounded))
+                    .foregroundColor(repeatStatusColor)
+                    .lineLimit(1)
+                    .help("Repeat last typed value or last duplicate/move")
             }
             Spacer()
-            Toggle(isOn: $autoPasteEnabled) {
+            Toggle(isOn: $settings.autoPasteEnabled) {
                 Text("Auto-paste")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
             }
             .toggleStyle(.switch)
             .controlSize(.mini)
-            .onChange(of: autoPasteEnabled) { newValue in
+            .onChange(of: settings.autoPasteEnabled) { newValue in
                 if newValue && !AutoPaste.isAccessibilityTrusted {
                     AutoPaste.requestAccessibility()
                 }
             }
-            .help("Auto-paste into the previous app on click (requires Accessibility permission)")
+            .help("Fill the selected cell or paste on click (needs Accessibility)")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
+    }
+
+    private var appVersionLabel: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return "v\(version ?? "2.1")"
+    }
+
+    private var repeatStatus: String {
+        let key = AppSettings.shared.repeatHotkeyLabel
+        if !repeater.accessibilityReady { return "Turn on Accessibility" }
+        if !repeater.captureReady { return "Turn on Input Monitoring" }
+        if repeater.preview.isEmpty { return key }
+        return "\(key) \(repeater.preview)"
+    }
+
+    private var repeatStatusColor: Color {
+        if !repeater.accessibilityReady || !repeater.captureReady {
+            return .orange.opacity(0.9)
+        }
+        return .secondary.opacity(0.7)
     }
 }
 
 struct InfoView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Redge — Clipboard & Calculator")
+            Text("Redge — Clipboard, Calculator & Repeat")
                 .font(.system(size: 13, weight: .semibold))
             Divider()
-            featureRow("rectangle.righthalf.filled", "Slam cursor into the right edge (vertical center) to open")
-            featureRow("keyboard", "⌃⌘V toggles the panel from anywhere")
+            featureRow("gearshape", "Settings: edge side, hotkeys, history size, Auto-paste, Repeat, notes export")
+            featureRow("arrow.uturn.left", "Repeat is off until you enable it. Then it replays the last shortcut, move, or Finder drop")
+            featureRow("folder", "Finder: rename another selected file to the last name (keeps extension)")
+            featureRow("tablecells", "Excel / Numbers: click a clip to fill the selected cell when Auto-paste is on")
+            featureRow("rectangle.righthalf.filled", "Slide the cursor into the configured screen edge to open")
+            featureRow("keyboard", "Panel and Repeat shortcuts are customizable in Settings")
+            featureRow("textformat", "Right-click a text clip to trim, change case, extract numbers, or split columns")
+            featureRow("clock", "Recent fills sit above Temp so you can reuse the last pasted values")
             featureRow("magnifyingglass", "Search across text and image OCR (auto-focused on hotkey)")
             featureRow("note.text", "Notes sub-tab: persistent text snippets, never wiped by Clear Temp")
             featureRow("bookmark", "Bookmark on a Temp row moves it to Notes (removed from Temp)")
             featureRow("pin.fill", "Pin items so they survive Clear and never expire")
             featureRow("text.viewfinder", "Images get OCR'd in the background — search inside screenshots")
             featureRow("hand.draw", "Drag images and text in/out of the panel")
-            featureRow("function", "Calculator + length / weight / temperature / storage converter")
+            featureRow("function", "Calculator: number keys type into the pad. C clears the current number; AC clears the sum. ⌫ deletes the last digit.")
             featureRow("lock.shield", "Passwords from password managers are skipped automatically")
             featureRow("hand.tap", "Auto-paste on click (toggle below — needs Accessibility)")
             featureRow("escape", "Esc closes the panel (when you are not typing)")
+            featureRow("camera", "Screenshot mode: stays hidden, or freezes if already open")
             featureRow("power", "Launch at Login from the menu-bar icon")
         }
         .padding(12)

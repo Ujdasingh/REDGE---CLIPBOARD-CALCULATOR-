@@ -1,8 +1,8 @@
-# Redge — Clipboard & Calculator
+# Redge — Clipboard, Calculator & Repeat
 
-> A gesture-triggered clipboard manager for macOS. Slide your cursor into the right edge — the panel slides in. Move away — it hides. No window to manage, no Dock icon, no app to babysit.
+> A gesture-triggered clipboard manager for macOS. Slide your cursor into the screen edge — the panel slides in. Move away — it hides. No Dock icon, no window to babysit.
 
-Bonus: it OCRs your screenshots so you can search inside images, has a built-in calculator with unit converter, and can auto-paste into the app you were just in.
+**v2.1** adds Settings, a first-run permission choice, Auto-paste on by default (fills the selected Excel/Numbers cell), text transforms, named notes, recent fills, and file clips. **Repeat stays off** until you turn it on.
 
 ![Redge panel](docs/hero.png)
 <!-- Replace docs/hero.png with a real screenshot once you've taken one. -->
@@ -13,20 +13,20 @@ Bonus: it OCRs your screenshots so you can search inside images, has a built-in 
 
 | | |
 |---|---|
-| **Edge trigger** | Cursor → right edge (vertical center) → panel slides in. Move off → hides. |
-| **Global hotkey** | `⌃⌘V` toggles the panel from anywhere. Auto-focuses the search field. |
-| **Text + images** | Captures both. Image rows show a thumbnail and dimensions. |
-| **OCR search** | Every image gets OCR'd by Vision in the background. Search matches text *inside* screenshots. |
-| **Pin items** | Hover any row → pin icon. Pinned items survive Clear and never expire. |
-| **Notes** | Bookmark a Temp row to move it into persistent Notes. Notes never expire. |
-| **Copy time** | Each row shows when it was copied — time today, date otherwise. |
-| **Drag in / out** | Drop images or text onto the panel. Drag any row out into Mail / Notes / Slack / Figma. |
-| **Auto-paste** | Optional: click an item → simulates `⌘V` into the previously-focused app. Requires Accessibility. |
-| **Calculator** | Basic 4-function calc with running expression line and 20-entry history. Full keyboard input (digits, `+ - * / =`, Enter, Backspace, Escape). Click any history row to recall. |
-| **Unit converter** | Length, weight, temperature, file size. |
-| **Persistent history** | Text, images, OCR text, and pin state saved to disk and restored on launch. |
+| **Edge trigger** | Cursor → screen edge (right or left, configurable) → panel slides in. Move off → hides. Stays out of macOS screenshot mode. |
+| **Settings** | Hotkeys, edge side/thickness/height, hide delay, history size, Auto-paste, Repeat, notes export/import, check for updates. |
+| **Global hotkey** | `⌃⌘V` toggles the panel (customizable). Auto-focuses search. |
+| **Auto-paste** | Click a clip to fill the selected Excel/Numbers cell, or paste into the previous app. On by default. Needs Accessibility. |
+| **Repeat Last** | Off until enabled. Then `⌘⌥R` (customizable) replays the last shortcut, shortcut+move, or Finder drop. Needs Accessibility + Input Monitoring. |
+| **Text + images + files** | Captures all three. Hex colors show a swatch. URL rows open in the browser. |
+| **Transforms** | Right-click a text clip: trim, UPPER/lower, extract numbers, split tabs. |
+| **Recent fills** | Last pasted/filled values sit above Temp for one-click reuse. |
+| **OCR search** | Images are OCR’d by Vision. Search matches text *inside* screenshots. |
+| **Pin items** | Hover a row → pin. Pinned items survive Clear and never expire. |
+| **Notes** | Bookmark a Temp row, or add a titled snippet. Export/import JSON from Settings. Notes never expire. |
+| **Calculator** | 4-function calc with **%**, history, and a unit converter. |
 | **Password-aware** | Skips items copied by 1Password / Bitwarden / Keychain. |
-| **Launch at Login** | Toggle from the menu-bar icon (`SMAppService`). |
+| **Launch at Login** | Toggle from Settings or the menu-bar icon. |
 | **Menu-bar only** | No Dock icon, no app switcher clutter. |
 
 ---
@@ -39,29 +39,34 @@ Requires macOS 13+ and Xcode Command Line Tools (`xcode-select --install`).
 git clone https://github.com/Ujdasingh/REDGE---CLIPBOARD-CALCULATOR-.git
 cd REDGE---CLIPBOARD-CALCULATOR-
 ./build-app.sh
-mv Redge.app /Applications/
+cp -R Redge.app /Applications/
 open /Applications/Redge.app
 ```
 
-The build script generates the icon, builds the binary, ad-hoc signs the bundle, and attaches a custom icon attribute via `NSWorkspace.setIcon` (Finder reads this directly — no daemon caching to fight).
+The build script generates the icon, compiles a release binary, writes Info.plist (`&amp;` escaped), and signs with a stable **Redge Developer** identity so Accessibility does not reset on every rebuild. Always run **`/Applications/Redge.app`** — not a `swift run` or Downloads copy.
 
 ### Share as a DMG
-
-To build a disk image you can send to others (drag **Redge.app** → **Applications**):
 
 ```bash
 ./create-dmg.sh
 ```
 
-Output: `Redge-1.0.dmg` in the project folder. Recipients open the DMG and drag the app to Applications.
+Output: `Redge-2.1.0.dmg`. Recipients open the DMG and drag the app to Applications.
 
-If you already built the app and only need to repackage:
+Self-signed builds may need **System Settings → Privacy & Security → Open Anyway**, or right-click → **Open**.
+
+### Notarized distribution (Apple Developer ID)
+
+Notarization needs a paid Apple Developer account and a **Developer ID Application** certificate. This repo cannot create those for you.
 
 ```bash
+# After installing the certificate and storing notary credentials:
+#   xcrun notarytool store-credentials redge
+NOTARY_PROFILE=redge ./scripts/notarize.sh
 SKIP_BUILD=1 ./create-dmg.sh
 ```
 
-Because the app is ad-hoc signed, recipients may need **System Settings → Privacy & Security → Open Anyway** on first launch, or right-click → **Open**.
+Until then, **Check for Updates…** in Settings compares `CFBundleShortVersionString` to [GitHub Releases](https://github.com/Ujdasingh/REDGE---CLIPBOARD-CALCULATOR-/releases/latest).
 
 ---
 
@@ -69,19 +74,15 @@ Because the app is ad-hoc signed, recipients may need **System Settings → Priv
 
 | Action | How |
 |---|---|
-| Open panel | Cursor → right edge, vertical center. Or `⌃⌘V`. |
-| Hide panel | Move cursor off. Or `⌃⌘V` again. |
-| Pin panel open | Pin icon top-right of the panel. Disables auto-hide. |
-| Copy an item | Click the row. |
-| Pin an item | Hover row → pin icon. Pinned items sort to top. |
-| Open a URL | Hover URL row → arrow icon. |
-| Delete an item | Hover row → X icon. |
-| Clear history | Trash icon in the search bar (keeps pinned). |
-| Search | Type in the search field. Matches text *and* image OCR. |
-| Drop in | Drag images/text onto the panel. |
-| Drag out | Drag a row into another app. |
-| Calculator | Click the **Calculator** tab at the top. |
-| Recall calc result | Click any row in the calc history. |
+| Open panel | Cursor → configured edge, vertical center. Or the panel hotkey. |
+| Settings | Menu bar → Settings…, or the gear on the panel. |
+| Hide panel | Move cursor off. Or the panel hotkey again. |
+| Fill / paste | Click a row (Auto-paste on). Excel/Numbers get the selected cell. |
+| Repeat last | Enable Repeat in Settings, then press the Repeat hotkey. |
+| Transforms | Right-click a text row. |
+| Pin panel open | Pin icon top-right of the panel. |
+| Notes | Notes sub-tab → + for a titled snippet. Settings → Export/Import. |
+| Calculator | Calculator tab at the top. |
 
 ---
 
@@ -89,31 +90,37 @@ Because the app is ad-hoc signed, recipients may need **System Settings → Priv
 
 Redge does not phone home. Data lives in `~/Library/Application Support/Redge/`.
 
-Optional permissions:
-- **Accessibility** — only when you enable Auto-paste (simulates `⌘V`).
-- **Login Items** — only when you enable Launch at Login.
+On first launch, choose **Clipboard only** or **Clipboard + Repeat**:
 
-Clipboard polling, hotkey, edge detection, and OCR all work with **zero permissions**.
+- **Clipboard only** — history, OCR, calculator, Auto-paste. Accessibility is requested when you fill a cell.
+- **Clipboard + Repeat** — also records shortcuts and last actions. Adds Input Monitoring.
+
+Always enable the **Redge** icon in Privacy settings, not Terminal.
 
 ---
 
 ## Architecture
 
-Swift Package, ~1500 LOC.
+Swift Package.
 
 ```
 Sources/Redge/
-├── main.swift              — entry; sets .accessory activation policy
-├── AppDelegate.swift       — orchestrator: status item, mouse polling, hotkey
-├── ClipboardManager.swift  — pasteboard polling, OCR, search, dedup, persistence
-├── ClipboardWindow.swift   — NSPanel + SwiftUI panel view, drag/drop, info popover
-├── Calculator.swift        — calc state machine + converter + history
+├── main.swift              — entry; .accessory activation policy
+├── AppDelegate.swift       — status item, edge polling, hotkeys, onboarding
+├── AppSettings.swift       — persisted preferences + hotkey labels
+├── SettingsWindow.swift    — Settings panel
+├── OnboardingWindow.swift  — first-run Clipboard vs Repeat
+├── RepeatEngine.swift      — last action capture + replay (off by default)
+├── ClipboardManager.swift  — pasteboard, OCR, notes, recent fills
+├── ClipboardWindow.swift   — NSPanel + SwiftUI
+├── TextTools.swift         — trim / case / numbers / color
+├── Calculator.swift        — calc + converter
 ├── Persistence.swift       — JSON + image-blob store
-├── HotKey.swift            — Carbon RegisterEventHotKey wrapper
-└── AutoPaste.swift         — CGEvent ⌘V synthesis + Accessibility prompt
+├── HotKey.swift            — Carbon RegisterEventHotKey
+├── AutoPaste.swift         — Excel/Numbers fill + ⌘V
+├── UpdateChecker.swift     — GitHub releases/latest
+└── ScreenshotGuard.swift   — hide/freeze during screenshots
 ```
-
-Plus `gen_icon.swift` (draws the icon programmatically with `NSBezierPath`) and `set_bundle_icon.swift` (attaches the custom icon via `NSWorkspace.setIcon`).
 
 ---
 

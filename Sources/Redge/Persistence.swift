@@ -57,6 +57,12 @@ final class PersistenceStore {
                     text: s, imageFilename: nil,
                     ocrText: item.ocrText, isPinned: item.isPinned
                 ))
+            case .file(let path):
+                persisted.append(PersistedItem(
+                    id: item.id, date: item.date, kind: "file",
+                    text: path, imageFilename: nil,
+                    ocrText: item.ocrText, isPinned: item.isPinned
+                ))
             case .image(let data):
                 let filename = "\(item.id.uuidString).png"
                 let url = imagesURL.appendingPathComponent(filename)
@@ -102,6 +108,10 @@ final class PersistenceStore {
                 guard let text = p.text else { return nil }
                 return ClipboardItem(id: p.id, content: .text(text), date: p.date,
                                      ocrText: p.ocrText, isPinned: p.isPinned)
+            case "file":
+                guard let path = p.text, !path.isEmpty else { return nil }
+                return ClipboardItem(id: p.id, content: .file(path), date: p.date,
+                                     ocrText: p.ocrText, isPinned: p.isPinned)
             case "image":
                 guard let filename = p.imageFilename,
                       let imgData = try? Data(contentsOf: imagesURL.appendingPathComponent(filename)) else {
@@ -113,5 +123,23 @@ final class PersistenceStore {
                 return nil
             }
         }
+    }
+
+    func exportNotes(_ notes: [Note], to url: URL) {
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(notes).write(to: url)
+        } catch {
+            print("Redge notes export failed: \(error)")
+        }
+    }
+
+    func importNotes(from url: URL) -> [Note] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode([Note].self, from: data)) ?? []
     }
 }

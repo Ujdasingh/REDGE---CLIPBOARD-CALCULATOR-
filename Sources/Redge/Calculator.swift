@@ -8,6 +8,9 @@ final class CalculatorState: ObservableObject {
     /// True when the Calculator tab is currently visible. Used by the panel's
     /// key-monitor to know whether to route digit/operator keypresses here.
     var isActive: Bool = false
+    /// True while the unit-converter value field is focused — number keys
+    /// should type into that field instead of the calculator.
+    var converterFieldFocused: Bool = false
 
     private var lastNumber: Double = 0
     private var pendingOp: Op? = nil
@@ -48,6 +51,7 @@ final class CalculatorState: ObservableObject {
     }
 
     func input(_ digit: String) {
+        converterFieldFocused = false
         if wasEquals {
             expression = ""
             display = "0"
@@ -64,6 +68,7 @@ final class CalculatorState: ObservableObject {
     }
 
     func setOp(_ o: Op) {
+        converterFieldFocused = false
         if wasEquals {
             expression = "\(display) \(o.symbol)"
             lastNumber = currentValue()
@@ -90,6 +95,7 @@ final class CalculatorState: ObservableObject {
     }
 
     func equals() {
+        converterFieldFocused = false
         if let pending = pendingOp {
             let result = pending.apply(lastNumber, currentValue())
             let fullExpression = expression + " " + display
@@ -123,8 +129,29 @@ final class CalculatorState: ObservableObject {
         }
     }
 
+    /// iOS-style percent: 50% → 0.5; 200 + 10% → 20 (then = yields 220).
+    func percent() {
+        let value = currentValue()
+        if let pending = pendingOp, pending == .add || pending == .sub {
+            display = format(lastNumber * value / 100)
+        } else {
+            display = format(value / 100)
+        }
+    }
+
     func backspace() {
-        if clearOnNext || wasEquals { return }
+        // After an operator, display still shows the previous number until a
+        // digit is typed. ⌫ should not wipe the whole sum — just start a fresh
+        // current operand.
+        if wasEquals {
+            wasEquals = false
+            clearOnNext = false
+        }
+        if clearOnNext {
+            display = "0"
+            clearOnNext = false
+            return
+        }
         if display.count > 1 {
             display.removeLast()
             if display == "-" { display = "0" }
@@ -132,6 +159,20 @@ final class CalculatorState: ObservableObject {
             display = "0"
         }
     }
+
+    /// iOS-style C / AC: first tap clears the current number, second tap clears the sum.
+    func tapClear() {
+        converterFieldFocused = false
+        if display != "0" {
+            display = "0"
+            wasEquals = false
+            if pendingOp != nil { clearOnNext = true }
+            return
+        }
+        clear()
+    }
+
+    var clearButtonTitle: String { display != "0" ? "C" : "AC" }
 
     func recall(_ entry: HistoryEntry) {
         display = entry.result
@@ -147,44 +188,101 @@ final class CalculatorState: ObservableObject {
     }
 
     /// Routes a keyboard event to the calculator. Returns true if consumed.
-    /// Returns false to let the event propagate (e.g. modifier shortcuts).
     func handleKey(_ event: NSEvent) -> Bool {
-        guard isActive else { return false }
+        guard isActive, !converterFieldFocused else { return false }
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        // Skip if any modifier is held (cmd/ctrl/opt) — let those propagate as
-        // app shortcuts. Shift is OK so user can type "+" via shift+= on US layout.
-        if !mods.subtracting(.shift).isEmpty { return false }
+        if mods.contains(.command) || mods.contains(.control) || mods.contains(.option) {
+            return false
+        }
 
-        let chars = event.charactersIgnoringModifiers ?? ""
-        switch chars {
-        case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
-            input(chars)
-        case ".":
-            input(".")
-        case "+":
+        let shifted = mods.contains(.shift)
+        let chars = event.characters ?? ""
+
+        // Use the glyph the key actually produced. Shift+= is "+", not "=";
+        // Shift+8 is "*", not "8". charactersIgnoringModifiers got this wrong.
+        if chars.contains(where: { "+＋".contains($0) }) {
             setOp(.add)
-        case "-":
-            setOp(.sub)
-        case "*", "x", "X":
+            return true
+        }
+        if chars.contains(where: { "*×xX".contains($0) }) {
             setOp(.mul)
-        case "/":
+            return true
+        }
+        if chars.contains(where: { "/÷".contains($0) }) {
             setOp(.div)
-        case "=":
+            return true
+        }
+        if chars.contains(where: { "-−–—".contains($0) }) {
+            setOp(.sub)
+            return true
+        }
+        if chars.contains(where: { "%％".contains($0) }) {
+            percent()
+            return true
+        }
+        if chars.contains(where: { "=＝".contains($0) }) {
             equals()
-        default:
-            // Special keys identified by keyCode
+            return true
+        }
+        if chars.contains(".") || chars.contains(",") {
+            input(".")
+            return true
+        }
+        if let digit = chars.first, digit.isNumber, chars.count == 1 {
+            input(String(digit))
+            return true
+        }
+
+        // Numpad and keys that send empty `characters` on some layouts.
+        switch event.keyCode {
+        case 82: input("0"); return true
+        case 83: input("1"); return true
+        case 84: input("2"); return true
+        case 85: input("3"); return true
+        case 86: input("4"); return true
+        case 87: input("5"); return true
+        case 88: input("6"); return true
+        case 89: input("7"); return true
+        case 91: input("8"); return true
+        case 92: input("9"); return true
+        case 65: input("."); return true
+        case 67: setOp(.mul); return true
+        case 69: setOp(.add); return true
+        case 75: setOp(.div); return true
+        case 78: setOp(.sub); return true
+        case 81, 36, 76: equals(); return true
+        case 71: tapClear(); return true
+        case 51: backspace(); return true
+        case 53: clear(); return true
+        default: break
+        }
+
+        if shifted {
             switch event.keyCode {
-            case 36, 76:  // Return, Enter (numpad)
-                equals()
-            case 51:      // Delete / backspace
-                backspace()
-            case 53:      // Escape
-                clear()
-            default:
-                return false
+            case 24: setOp(.add); return true   // Shift+=
+            case 28: setOp(.mul); return true   // Shift+8
+            default: return false
             }
         }
-        return true
+
+        switch event.keyCode {
+        case 29: input("0"); return true
+        case 18: input("1"); return true
+        case 19: input("2"); return true
+        case 20: input("3"); return true
+        case 21: input("4"); return true
+        case 23: input("5"); return true
+        case 22: input("6"); return true
+        case 26: input("7"); return true
+        case 28: input("8"); return true
+        case 25: input("9"); return true
+        case 47: input("."); return true
+        case 24: equals(); return true
+        case 27: setOp(.sub); return true
+        case 44: setOp(.div); return true
+        default:
+            return false
+        }
     }
 
     private func currentValue() -> Double { Double(display) ?? 0 }
@@ -202,6 +300,7 @@ struct CalculatorView: View {
     @ObservedObject var state: CalculatorState
     @State private var didCopy = false
     let onCopy: (String) -> Void
+    var onBecameActive: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 6) {
@@ -215,8 +314,15 @@ struct CalculatorView: View {
         .padding(.horizontal, 10)
         .padding(.top, 6)
         .padding(.bottom, 8)
-        .onAppear { state.isActive = true }
-        .onDisappear { state.isActive = false }
+        .onAppear {
+            state.isActive = true
+            state.converterFieldFocused = false
+            onBecameActive()
+        }
+        .onDisappear {
+            state.isActive = false
+            state.converterFieldFocused = false
+        }
     }
 
     @ViewBuilder
@@ -298,9 +404,9 @@ struct CalculatorView: View {
     private var buttonsGrid: some View {
         VStack(spacing: 4) {
             HStack(spacing: 4) {
-                CalcButton(label: "AC", kind: .fn) { state.clear() }
+                CalcButton(label: state.clearButtonTitle, kind: .fn) { state.tapClear() }
                 CalcButton(label: "±", kind: .fn) { state.toggleSign() }
-                CalcButton(label: "⌫", kind: .fn) { state.backspace() }
+                CalcButton(label: "%", kind: .fn) { state.percent() }
                 CalcButton(label: "÷", kind: .op) { state.setOp(.div) }
             }
             HStack(spacing: 4) {
@@ -322,7 +428,7 @@ struct CalculatorView: View {
                 CalcButton(label: "+", kind: .op) { state.setOp(.add) }
             }
             HStack(spacing: 4) {
-                CalcButton(label: "00", kind: .digit) { state.input("0"); state.input("0") }
+                CalcButton(label: "⌫", kind: .fn) { state.backspace() }
                 CalcButton(label: "0", kind: .digit) { state.input("0") }
                 CalcButton(label: ".", kind: .digit) { state.input(".") }
                 CalcButton(label: "=", kind: .op) { state.equals() }
@@ -400,6 +506,7 @@ struct CalcButton: View {
 
 struct ConverterView: View {
     @ObservedObject var state: CalculatorState
+    @FocusState private var valueFocused: Bool
 
     enum ConvCategory: String, CaseIterable, Hashable {
         case length = "Length"
@@ -523,10 +630,15 @@ struct ConverterView: View {
             HStack(spacing: 6) {
                 TextField("Value", text: $state.convFromValue)
                     .textFieldStyle(.plain)
+                    .focused($valueFocused)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
                     .background(Color.white.opacity(0.06))
                     .clipShape(RoundedRectangle(cornerRadius: 5))
+                    .onChange(of: valueFocused) { focused in
+                        state.converterFieldFocused = focused
+                    }
+                    .onAppear { valueFocused = false }
                 Picker("", selection: $state.convFromUnit) {
                     ForEach(ConverterView.unitsForCategory(state.convCategory), id: \.self) { u in
                         Text(u.label).tag(u)
@@ -555,6 +667,7 @@ struct ConverterView: View {
                 .labelsHidden()
             }
         }
+        .onDisappear { state.converterFieldFocused = false }
     }
 }
 
